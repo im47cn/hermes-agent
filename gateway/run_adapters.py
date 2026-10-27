@@ -889,6 +889,10 @@ class GatewayAdapterLifecycleMixin:
     def _publish_primary_adapter(self, platform, adapter) -> None:
         """Register a connected primary adapter and wire voice mode/input (transcription without /voice join)."""
         self.adapters[platform] = adapter
+        # Bot-to-bot internal routing: Feishu never delivers bot→bot messages,
+        # so the adapter's send hook dispatches @peer mentions through us.
+        if platform is Platform.FEISHU:
+            adapter._bot_to_bot_router = self._route_bot_to_bot
         self._sync_voice_mode_state_to_adapter(adapter)
         self._bind_voice_input_callback(adapter)
 
@@ -1407,6 +1411,8 @@ class GatewayAdapterLifecycleMixin:
         # Secondary adapters carry their profile so prune paths namespace topic bindings correctly.
         # See #76423.
         adapter._hermes_profile_name = profile_name
+        if platform is Platform.FEISHU:
+            adapter._bot_to_bot_router = self._route_bot_to_bot
         # A secondary's port-binding adapter never binds: the default profile owns the one shared
         # listener, which forwards /p/<profile>/<path> to this adapter's app (shared_ingress.py).
         if self._multiplex_on() and platform.value not in SHARED_LISTENER_MIRROR_PLATFORMS \

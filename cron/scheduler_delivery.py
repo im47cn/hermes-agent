@@ -1563,7 +1563,7 @@ def _live_send_text(
         _warn_live_lane_failure(job, msg, t.is_relay)
         target_errors.append(msg)
         return False, False, None
-    if send_raw_response and t.thread_id and send_raw_response.get("thread_fallback"):
+    if isinstance(send_raw_response, dict) and t.thread_id and send_raw_response.get("thread_fallback"):
         requested_thread_id = send_raw_response.get("requested_thread_id") or t.thread_id
         _note_target_error(
             job,

@@ -4009,6 +4009,76 @@ class GatewayRunner(
         "codex-runtime": "gateway.busy.reject_codex_runtime",
         "moa": "gateway.busy.reject_moa"}
 
+    # Max hops for bot-to-bot internal routing (breaks A→B→C→A rings).
+    _BOT_TO_BOT_HOP_LIMIT = 3
+
+    def _feishu_profile_of(self, adapter: Any) -> str:
+        """Profile owning *adapter*; the primary map belongs to ``_primary_profile_name``."""
+        for profile, adapters in (getattr(self, "_profile_adapters", None) or {}).items():
+            if adapters.get(Platform.FEISHU) is adapter:
+                return profile
+        return getattr(self, "_primary_profile_name", "default")
+
+    def _feishu_adapter_for_profile(self, profile: str) -> Optional[Any]:
+        primary = getattr(self, "_primary_profile_name", "default")
+        if profile and profile != primary:
+            return ((getattr(self, "_profile_adapters", None) or {}).get(profile) or {}).get(Platform.FEISHU)
+        return self.adapters.get(Platform.FEISHU)
+
+    async def _route_bot_to_bot(
+        self, targets, content: str, chat_id: str, sender_adapter, hop: int = 0,
+        thread_id: Optional[str] = None, anchor_message_id: Optional[str] = None,
+    ) -> None:
+        """Inject an outbound @peer mention directly into the peer adapter.
+
+        Feishu does not deliver bot→bot messages, so the sender's send hook calls
+        this with the resolved peer profiles. Two loop breakers: skip the sender's
+        own profile (A↔B ping-pong) and cap hops (rings).
+        """
+        if hop >= self._BOT_TO_BOT_HOP_LIMIT:
+            return
+        import uuid as _uuid
+
+        sender_profile = self._feishu_profile_of(sender_adapter)
+        for target_profile, _name in targets:
+            if not target_profile or target_profile == sender_profile:
+                continue
+            target = self._feishu_adapter_for_profile(target_profile)
+            if target is None or target is sender_adapter:
+                continue
+            sender_name = getattr(sender_adapter, "_bot_name", None) or sender_profile or "peer-bot"
+            target_name = getattr(target, "_bot_name", None) or target_profile
+            try:
+                source = target.build_source(
+                    chat_id=chat_id, chat_name=chat_id, chat_type="group",
+                    user_id=getattr(sender_adapter, "_bot_open_id", None) or "bot",
+                    user_name=sender_name, is_bot=True, thread_id=thread_id,
+                )
+                # The peer should see the reply, not the sender's chain-of-thought.
+                _clean = re.sub(
+                    r"💭\s*\*\*Reasoning:\*\*\s*```.*?```", "", content, flags=re.DOTALL,
+                ).strip()
+                synthetic = MessageEvent(
+                    text=f"[{sender_name} → @{target_name}]: {_clean}",
+                    message_type=MessageType.TEXT,
+                    source=source,
+                    raw_message=None,
+                    message_id=f"bot2bot-{_uuid.uuid4().hex}",
+                    reply_to_message_id=anchor_message_id,
+                    channel_prompt=target._resolve_channel_prompt(chat_id),
+                    metadata={"hop": hop + 1, "source_profile": sender_profile},
+                )
+                logger.info(
+                    "[Gateway] bot-to-bot route: %s → %s (hop %d, chat %s)",
+                    sender_profile or "?", target_profile, hop + 1, chat_id,
+                )
+                # The target's next send routes back to the sender even without an
+                # @; hop+1 bounds the ping-pong.
+                target._bot_to_bot_reply_profile = (sender_profile, hop + 1)
+                await target._handle_message_with_guards(synthetic)
+            except Exception:
+                logger.warning("[Gateway] bot-to-bot injection to %s failed", target_profile, exc_info=True)
+
     def _active_profile_name(self) -> str:
         """Return the profile name this gateway represents."""
         try:

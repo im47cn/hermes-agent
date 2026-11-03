@@ -1907,6 +1907,16 @@ def _platform_has_bot_credential(platform: "Platform", platform_config: "Platfor
         session = Path(platform_config.extra.get(
             "session_path", get_hermes_dir("platforms/whatsapp/session", "whatsapp/session")))
         return (session / "creds.json").exists()
+    if platform is Platform.FEISHU:
+        # Feishu authenticates by the app_id/app_secret pair on extra (the plugin's
+        # validate_config gate reads exactly that), never by a token env var, so it has no
+        # PLATFORM_TOKEN_ENV_NAMES entry and the generic check below would always report
+        # "credentialed". Under multiplex with all apps bound to profiles, the default-profile
+        # view has no app_id — and the #64674 skip must apply, or every startup and reconnect
+        # pass attempts a primary adapter that can only fail validation.
+        # Local backport of upstream PR (branch im47cn/fix-feishu-primary-credential-guard);
+        # revert once upstream merges and the deployment pulls it.
+        return bool((platform_config.extra or {}).get("app_id", "").strip())
     if platform not in PLATFORM_TOKEN_ENV_NAMES:
         return True
     for attr in ("token", "api_key"):  # some adapters accept api_key as the primary credential
